@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>跨设备工艺事件回放与风险处置</title>
+<style>
+  :root { --bd:#d0d7de; --bg:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin:0; background:var(--bg); color:#1f2328; }
+  header { background:#0b3d66; color:#fff; padding:10px 20px; }
+  header h1 { font-size:17px; margin:0; }
+  nav { background:#fff; border-bottom:1px solid var(--bd); padding:0 12px; }
+  nav button { background:none; border:none; padding:10px 14px; cursor:pointer; font-size:14px;
+               border-bottom:2px solid transparent; }
+  nav button.active { border-bottom-color:#0b3d66; font-weight:600; }
+  main { padding:16px 20px; }
+  section { display:none; } section.active { display:block; }
+  .card { background:#fff; border:1px solid var(--bd); border-radius:8px; padding:14px; margin-bottom:14px; }
+  .card h3 { margin:0 0 10px; font-size:14px; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th, td { border:1px solid var(--bd); padding:4px 8px; text-align:left; }
+  th { background:var(--bg); }
+  input, select, textarea { padding:5px 8px; border:1px solid var(--bd); border-radius:6px; font-size:13px; }
+  button.act { background:#0b3d66; color:#fff; border:none; border-radius:6px; padding:6px 12px;
+               cursor:pointer; font-size:13px; margin-right:6px; }
+  button.act.sub { background:#57606a; } button.act.warn { background:var(--warn); }
+  button.act:disabled { opacity:.5; cursor:default; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; }
+  .t-open { background:#fff8c5; color:var(--warn); } .t-accepted { background:#dafbe1; color:var(--ok); }
+  .t-rejected { background:#ffebe9; color:var(--bad); } .t-returned { background:#ddf4ff; color:#0969da; }
+  .t-exceed { background:#ffebe9; color:var(--bad); } .t-gap { background:#fff8c5; color:var(--warn); }
+  .t-meter_jump { background:#ddf4ff; color:#0969da; }
+  #log { background:#0d1117; color:#7ee787; font-family:ui-monospace,monospace; font-size:12px;
+         padding:10px; border-radius:8px; height:150px; overflow:auto; white-space:pre-wrap; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  .muted { color:#57606a; font-size:12px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  progress { width:260px; }
+</style>
+</head>
+<body>
+<header><h1>跨设备工艺事件回放与风险处置服务</h1></header>
+<nav>
+  <button data-tab="import" class="active">设备与导入</button>
+  <button data-tab="timeline">生产时间线</button>
+  <button data-tab="review">复核队列</button>
+  <button data-tab="history">处理历史</button>
+  <button data-tab="report">审计报告</button>
+</nav>
+<main>
+
+<section id="tab-import" class="active">
+  <div class="card">
+    <h3>注册设备</h3>
+    <div class="row">
+      <input id="dev-id" placeholder="设备ID 如 printer-1">
+      <input id="dev-name" placeholder="名称">
+      <button class="act" onclick="createDevice()">注册</button>
+    </div>
+    <div class="row"><select id="dev-list" onchange="onDeviceChange()"></select>
+      <button class="act sub" onclick="loadDevices()">刷新设备</button></div>
+    <div id="dev-secret" class="muted"></div>
+  </div>
+  <div class="card">
+    <h3>批次导入（断点续传 · 重复包幂等）</h3>
+    <div class="row">
+      <input id="batch-id" placeholder="批次ID 如 batch-001">
+      <input type="file" id="pkg-file">
+      <button class="act" onclick="uploadPackage()">开始/继续上传</button>
+      <progress id="up-prog" value="0" max="1"></progress>
+    </div>
+    <div class="row">
+      <button class="act sub" onclick="sealAndImport()">封存并导入</button>
+      <span id="up-status" class="muted"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>时钟漂移校正与时间线重建</h3>
+    <div class="row">
+      <button class="act" onclick="createCorrection()">估计漂移并生成校正版本</button>
+      <select id="corr-list"></select>
+      <button class="act" onclick="buildTimeline()">重建生产时间线</button>
+    </div>
+    <div id="corr-info" class="muted"></div>
+  </div>
+  <div class="card"><h3>操作日志</h3><div id="log"></div></div>
+</section>
+
+<section id="tab-timeline">
+  <div class="card">
+    <h3>时间线选择</h3>
+    <div class="row">
+      <select id="tl-dev" onchange="loadTimelines()"></select>
+      <select id="tl-list"></select>
+      <button class="act sub" onclick="loadTimelines()">刷新</button>
+      <button class="act" onclick="loadPoints()">加载时间线</button>
+    </div>
+    <div id="tl-meta" class="muted"></div>
+  </div>
+  <div class="card">
+    <h3>原始事件 vs 漂移校正后（按校正时间排序）</h3>
+    <div style="max-height:480px;overflow:auto">
+    <table id="points-table">
+      <thead><tr><th>#</th><th>类型</th><th>序号</th><th>设备时钟</th><th>接收时钟</th>
+        <th>校正时间</th><th>数值</th><th>漂移差(ms)</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </div>
+</section>
+
+<section id="tab-review">
+  <div class="card">
+    <h3>待复核项</h3>
+    <div class="row">
+      <select id="rev-dev" onchange="loadFindings()"><option value="">全部设备</option></select>
+      <select id="rev-status" onchange="loadFindings()">
+        <option value="">全部状态</option><option value="open">待复核</option>
+        <option value="accepted">已接受</option><option value="rejected">已驳回</option>
+        <option value="returned">已退回</option>
+      </select>
+      <input id="reviewer" placeholder="复核人" value="reviewer-1">
+      <button class="act sub" onclick="loadFindings()">刷新</button>
+    </div>
+    <table id="findings-table">
+      <thead><tr><th>ID</th><th>设备</th><th>类型</th><th>区间(校正时间)</th><th>详情</th>
+        <th>状态</th><th>版本</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="tab-history">
+  <div class="card">
+    <h3>处理历史</h3>
+    <div class="row">
+      <select id="his-dev" onchange="loadHistory()"><option value="">全部设备</option></select>
+      <button class="act sub" onclick="loadHistory()">刷新</button>
+    </div>
+    <table id="history-table">
+      <thead><tr><th>时间</th><th>复核项</th><th>动作</th><th>复核人</th><th>备注</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="tab-report">
+  <div class="card">
+    <h3>导出签名审计报告</h3>
+    <div class="row">
+      <select id="rep-dev" onchange="loadReportTimelines()"></select>
+      <select id="rep-tl"></select>
+      <button class="act" onclick="exportReport()">导出</button>
+      <button class="act sub" onclick="downloadReport()" id="rep-dl" disabled>下载</button>
+    </div>
+    <textarea id="rep-out" style="width:100%;height:140px" readonly></textarea>
+  </div>
+  <div class="card">
+    <h3>加载校验（跨设备或篡改将拒绝）</h3>
+    <textarea id="rep-in" style="width:100%;height:120px" placeholder="粘贴报告信封 JSON"></textarea>
+    <div class="row" style="margin-top:8px">
+      <input type="file" id="rep-file">
+      <button class="act" onclick="loadReport()">校验并加载</button>
+    </div>
+    <div id="rep-result"></div>
+  </div>
+</section>
+
+</main>
+<script>
+const CHUNK = 256 * 1024;
+let session = null, lastReport = null;
+
+const $ = id => document.getElementById(id);
+function log(msg, cls) {
+  const el = $("log");
+  el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+async function api(method, path, body, raw) {
+  const opt = { method, headers: {} };
+  if (raw !== undefined) { opt.body = raw.data; opt.headers["X-Chunk-SHA256"] = raw.sha; }
+  else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.error || r.statusText); e.status = r.status; throw e; }
+  return j;
+}
+async function sha256hex(buf) {
+  const d = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+const fmt = t => new Date(t).toLocaleString("zh-CN", { hour12: false });
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll("main section").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  $("tab-" + b.dataset.tab).classList.add("active");
+  if (b.dataset.tab === "review") loadFindings();
+  if (b.dataset.tab === "history") loadHistory();
+});
+
+async function createDevice() {
+  try {
+    const d = await api("POST", "/api/devices", { device_id: $("dev-id").value, name: $("dev-name").value });
+    $("dev-secret").textContent = `设备 ${d.device_id} 签名密钥（仅显示一次）：${d.secret}`;
+    log(`设备已注册: ${d.device_id}`);
+    await loadDevices();
+  } catch (e) { log("注册失败: " + e.message); }
+}
+async function loadDevices() {
+  const devs = await api("GET", "/api/devices");
+  for (const id of ["dev-list", "tl-dev", "rev-dev", "his-dev", "rep-dev"]) {
+    const sel = $(id), keep = sel.value, first = sel.querySelector("option");
+    sel.innerHTML = "";
+    if (first && !first.value) sel.appendChild(first);
+    devs.forEach(d => { const o = document.createElement("option");
+      o.value = d.device_id; o.textContent = `${d.device_id} (${d.name})`; sel.appendChild(o); });
+    if (keep) sel.value = keep;
+  }
+  onDeviceChange();
+}
+function curDev() { return $("dev-list").value; }
+async function onDeviceChange() {
+  if (!curDev()) return;
+  try {
+    const cs = await api("GET", `/api/devices/${curDev()}/corrections`);
+    const sel = $("corr-list"); sel.innerHTML = "";
+    cs.forEach(c => { const o = document.createElement("option");
+      o.value = c.version_id;
+      o.textContent = `${c.version_id.slice(0,8)} a=${c.a} b=${c.b} ${c.status}${c.referenced?" [已引用]":""}`;
+      sel.appendChild(o); });
+    $("corr-info").textContent = cs.length ? "" : "尚无校正版本";
+  } catch (e) { log(e.message); }
+}
+
+async function uploadPackage() {
+  const file = $("pkg-file").files[0], dev = curDev();
+  const batch = $("batch-id").value || (file && file.name.replace(/\W+/g, "_"));
+  if (!file || !dev || !batch) return log("请选择设备、批次ID和文件");
+  try {
+    const pkgSha = await sha256hex(await file.arrayBuffer());
+    const total = Math.max(1, Math.ceil(file.size / CHUNK));
+    session = await api("POST", "/api/uploads",
+      { device_id: dev, batch_id: batch, total_chunks: total, package_sha256: pkgSha });
+    log(`上传会话 ${session.session_id.slice(0,8)} ${session.resumed ? "断点续传" : "新建"}，` +
+        `已完成 ${session.received_chunks.length}/${total} 块`);
+    const have = new Set(session.received_chunks);
+    for (let i = 0; i < total; i++) {
+      if (have.has(i)) continue;
+      const buf = await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer();
+      const r = await api("PUT", `/api/uploads/${session.session_id}/chunks/${i}`,
+        undefined, { data: buf, sha: await sha256hex(buf) });
+      $("up-prog").value = (i + 1) / total;
+      if (r.idempotent) log(`块 ${i} 重复，幂等跳过`);
+    }
+    $("up-prog").value = 1;
+    $("up-status").textContent = `上传完成：${total} 块，可封存导入`;
+    log(`批次 ${batch} 上传完成`);
+  } catch (e) { log("上传失败: " + e.message); $("up-status").textContent = "失败: " + e.message; }
+}
+async function sealAndImport() {
+  if (!session) return log("请先上传");
+  try {
+    const s = await api("POST", `/api/uploads/${session.session_id}/seal`);
+    log(`封存${s.idempotent ? "（幂等）" : ""}: ${s.batch_id}`);
+    const r = await api("POST", "/api/batches/import",
+      { device_id: curDev(), batch_id: s.batch_id });
+    log(`导入${r.idempotent ? "（重复包，幂等跳过）" : ""}: ${r.event_count} 条事件`);
+  } catch (e) { log("封存/导入失败: " + e.message); }
+}
+async function createCorrection() {
+  try {
+    const c = await api("POST", `/api/devices/${curDev()}/corrections`, {});
+    log(`校正版本 ${c.version_id.slice(0,8)}: corrected = device_ts × ${c.a} + ${c.b}`);
+    onDeviceChange();
+  } catch (e) { log("校正失败: " + e.message); }
+}
+async function buildTimeline() {
+  const v = $("corr-list").value;
+  if (!v) return log("请先生成校正版本");
+  try {
+    const t = await api("POST", "/api/timelines/build", { device_id: curDev(), version_id: v });
+    log(`时间线 ${t.timeline_id.slice(0,8)} 重建完成，hash=${t.timeline_hash.slice(0,12)}…，` +
+        `新增待复核 ${t.new_findings} 项`);
+  } catch (e) { log("重建失败: " + e.message); }
+}
+
+async function loadTimelines() {
+  const dev = $("tl-dev").value; if (!dev) return;
+  const tls = await api("GET", `/api/devices/${dev}/timelines`);
+  const sel = $("tl-list"); sel.innerHTML = "";
+  tls.forEach(t => { const o = document.createElement("option"); o.value = t.timeline_id;
+    o.textContent = `${t.timeline_id.slice(0,8)} hash=${t.timeline_hash.slice(0,10)} ${fmt(t.created_at)}`;
+    sel.appendChild(o); });
+}
+async function loadPoints() {
+  const tl = $("tl-list").value; if (!tl) return;
+  const pts = await api("GET", `/api/timelines/${tl}/points`);
+  const tb = $("points-table").querySelector("tbody"); tb.innerHTML = "";
+  pts.forEach((p, i) => {
+    const tr = tb.insertRow();
+    [i + 1, p.kind, p.seq, p.device_ts, p.server_ts, p.corrected_ts,
+     p.value, p.corrected_ts - p.device_ts].forEach(v => tr.insertCell().textContent = v);
+  });
+  $("tl-meta").textContent = `共 ${pts.length} 个事件点`;
+}
+
+async function loadFindings() {
+  const q = new URLSearchParams();
+  if ($("rev-dev").value) q.set("device_id", $("rev-dev").value);
+  if ($("rev-status").value) q.set("status", $("rev-status").value);
+  const fs = await api("GET", "/api/findings?" + q);
+  const tb = $("findings-table").querySelector("tbody"); tb.innerHTML = "";
+  fs.forEach(f => {
+    const tr = tb.insertRow();
+    tr.insertCell().textContent = f.finding_id.slice(0, 10);
+    tr.insertCell().textContent = f.device_id;
+    tr.insertCell().innerHTML = `<span class="tag t-${f.type}">${f.type}</span>`;
+    tr.insertCell().textContent = `${f.start_ts} ~ ${f.end_ts}`;
+    tr.insertCell().textContent = f.details;
+    tr.insertCell().innerHTML = `<span class="tag t-${f.status}">${f.status}</span>`;
+    tr.insertCell().textContent = f.version;
+    const note = tr.insertCell(), inp = document.createElement("input");
+    inp.placeholder = "备注"; inp.style.width = "110px"; note.appendChild(inp);
+    const ops = tr.insertCell();
+    const mk = (label, cls, fn) => { const b = document.createElement("button");
+      b.textContent = label; b.className = "act " + cls; b.onclick = fn; ops.appendChild(b); return b; };
+    if (f.status === "open") {
+      mk("接受", "", () => doReview(f, "accept", inp.value));
+      mk("驳回", "warn", () => doReview(f, "reject", inp.value));
+      mk("退回重算", "sub", () => doReview(f, "return", inp.value));
+    } else if (f.status === "returned") {
+      mk("执行重算", "", () => doRecompute(f));
+    }
+    mk("历史", "sub", () => showFindingHistory(f.finding_id));
+  });
+}
+async function doReview(f, action, note) {
+  try {
+    await api("POST", `/api/findings/${f.finding_id}/reviews`,
+      { action, reviewer: $("reviewer").value || "anonymous", note, version: f.version });
+    log(`复核 ${f.finding_id.slice(0,10)}: ${action} 成功`);
+  } catch (e) { log(`复核冲突/失败: ${e.message}`); }
+  loadFindings();
+}
+async function doRecompute(f) {
+  try {
+    const t = await api("POST", `/api/findings/${f.finding_id}/recompute`,
+      { reviewer: $("reviewer").value || "system" });
+    log(`重算完成，新时间线 ${t.timeline_id.slice(0,8)}，新增待复核 ${t.new_findings} 项`);
+  } catch (e) { log(`重算失败（已回滚）: ${e.message}`); }
+  loadFindings();
+}
+async function showFindingHistory(fid) {
+  const h = await api("GET", `/api/findings/${fid}/history`);
+  log(`--- ${fid.slice(0,10)} 历史 ---`);
+  h.forEach(r => log(`  ${fmt(r.decided_at)} ${r.action} by ${r.reviewer} ${r.note || ""}`));
+  document.querySelector('[data-tab="import"]').click();
+}
+
+async function loadHistory() {
+  const q = $("his-dev").value ? "?device_id=" + $("his-dev").value : "";
+  const rs = await api("GET", "/api/reviews" + q);
+  const tb = $("history-table").querySelector("tbody"); tb.innerHTML = "";
+  rs.forEach(r => {
+    const tr = tb.insertRow();
+    [fmt(r.decided_at), r.finding_id.slice(0, 10), r.action, r.reviewer, r.note || ""]
+      .forEach(v => tr.insertCell().textContent = v);
+  });
+}
+
+async function loadReportTimelines() {
+  const dev = $("rep-dev").value; if (!dev) return;
+  const tls = await api("GET", `/api/devices/${dev}/timelines`);
+  const sel = $("rep-tl"); sel.innerHTML = "";
+  tls.forEach(t => { const o = document.createElement("option"); o.value = t.timeline_id;
+    o.textContent = `${t.timeline_id.slice(0,8)} ${fmt(t.created_at)}`; sel.appendChild(o); });
+}
+async function exportReport() {
+  try {
+    lastReport = await api("POST", "/api/reports/export",
+      { device_id: $("rep-dev").value, timeline_id: $("rep-tl").value });
+    $("rep-out").value = JSON.stringify(lastReport, null, 2);
+    $("rep-dl").disabled = false;
+    log(`报告已导出并签名: ${lastReport.report_id.slice(0,8)}`);
+  } catch (e) { log("导出失败: " + e.message); }
+}
+function downloadReport() {
+  const blob = new Blob([$("rep-out").value], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `audit-report-${lastReport.report_id.slice(0,8)}.json`;
+  a.click();
+}
+$("rep-file").onchange = async e => {
+  $("rep-in").value = await e.target.files[0].text();
+};
+async function loadReport() {
+  const el = $("rep-result");
+  try {
+    const env = JSON.parse($("rep-in").value);
+    const r = await api("POST", "/api/reports/load", env);
+    el.innerHTML = `<span class="ok">✔ 签名校验通过，报告可信（设备 ${r.payload.device_id}，` +
+      `时间线 ${r.payload.timeline_id.slice(0,8)}，复核项 ${r.payload.findings.length} 条）</span>`;
+  } catch (e) {
+    el.innerHTML = `<span class="bad">✘ 拒绝加载：${e.message}</span>`;
+  }
+}
+
+loadDevices();
+</script>
+</body>
+</html>
